@@ -4,6 +4,7 @@
 #include <iostream>
 #include <thread>
 #include <vector>
+#include <fstream>
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "MPC.h"
@@ -71,6 +72,7 @@ int main() {
   // MPC is initialized here!
   MPC mpc;
 
+
   h.onMessage([&mpc](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
@@ -91,15 +93,30 @@ int main() {
           double py = j[1]["y"];
           double psi = j[1]["psi"];
           double v = j[1]["speed"];
+          
 
+          // estimate the track as a 3rd polynomial
+          Eigen::Map<Eigen::VectorXd> xs(&ptsx[0], ptsx.size());
+          Eigen::Map<Eigen::VectorXd> ys(&ptsy[0], ptsy.size());
+          auto coeffs = polyfit(xs, ys, 3);
+          cout << "coeff: " << coeffs << endl;
+
+          // estimate error
+          double cte = py - polyeval(coeffs, px);
+          double epsi = psi - atan(coeffs[1]+coeffs[2]*2*px+coeffs[3]*3*px*px);
+          
           /*
           * TODO: Calculate steeering angle and throttle using MPC.
           *
           * Both are in between [-1, 1].
           *
           */
-          double steer_value;
-          double throttle_value;
+          Eigen::VectorXd state(6);
+          state << px, py, psi, v, cte, epsi;
+
+          auto actuator = mpc.Solve(state, coeffs);
+          double steer_value = actuator[0];
+          double throttle_value = actuator[1];
 
           json msgJson;
           msgJson["steering_angle"] = steer_value;
