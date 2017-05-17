@@ -79,7 +79,7 @@ int main() {
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
     string sdata = string(data).substr(0, length);
-    cout << sdata << endl;
+    // cout << sdata << endl;
     if (sdata.size() > 2 && sdata[0] == '4' && sdata[1] == '2') {
       string s = hasData(sdata);
       if (s != "") {
@@ -93,17 +93,51 @@ int main() {
           double py = j[1]["y"];
           double psi = j[1]["psi"];
           double v = j[1]["speed"];
+
+          // It seems that ptsx and ptsy contains the nearest way points (up to 6)
+          // ahead of current vehicle position (px, py).
+          // So it makes sense to transform from global corrdinates 
+          // to vehicle coordinates, for two reasons:
+          //  1. the polynomial fit of waypoints is expected to be more accurate
+          // in the vehicle coordinates, as in most cases the road is just linear
+          //  2. it helps the optimizer find optimal solutions more easily, because
+          // the optimal solutions won't be too far away from initials (all zeros).
+
+          // It turns out switching to the vehicle coordnates makes a huge
+          // improvement in performance, although I am not sure whether it is
+          // still possible to come up with a good solution with original coordinates.
+
+          // transform map coordinates to car coordinates
+          // (1) centerize to vehicle position
+          // (2) rotate -psi to align with vehichle y axis
+          vector<double> vehicle_xs(ptsx.size());
+          vector<double> vehicle_ys(ptsy.size());
+          for (auto i = 0; i < ptsx.size(); ++i) {
+            // centered
+            double centered_x = ptsx[i] - px;
+            double centered_y = ptsy[i] - py;
+            // rotated
+            vehicle_xs[i] = centered_x * cos(-psi) - centered_y * sin(-psi);
+            vehicle_ys[i] = centered_x * sin(-psi) + centered_y * cos(-psi);
+          }
           
 
           // estimate the track as a 3rd polynomial
-          Eigen::Map<Eigen::VectorXd> xs(&ptsx[0], ptsx.size());
-          Eigen::Map<Eigen::VectorXd> ys(&ptsy[0], ptsy.size());
+          Eigen::Map<Eigen::VectorXd> xs(&vehicle_xs[0], vehicle_xs.size());
+          Eigen::Map<Eigen::VectorXd> ys(&vehicle_ys[0], vehicle_ys.size());
           auto coeffs = polyfit(xs, ys, 3);
-          cout << "coeff: " << coeffs << endl;
 
-          // estimate error
-          double cte = py - polyeval(coeffs, px);
-          double epsi = psi - atan(coeffs[1]+coeffs[2]*2*px+coeffs[3]*3*px*px);
+          // From now on, vehicle position also transformed to
+          /*
+          px = 0;
+          py = 0;
+          psi = 0;
+          */
+
+          // estimate error - the derivative is actually
+          // linear when px = 0
+          double cte = polyeval(coeffs, 0) /*- py*/;
+          double epsi = atan(coeffs[1]) /*- psi*/;
           
           /*
           * TODO: Calculate steeering angle and throttle using MPC.
@@ -111,16 +145,19 @@ int main() {
           * Both are in between [-1, 1].
           *
           */
+          // now the vehicle state will always be in (x=0, y=0) with psi=0
           Eigen::VectorXd state(6);
-          state << px, py, psi, v, cte, epsi;
+          state << /*px=*/0, /*py=*/0, /*psi=*/0, v, cte, epsi;
 
           auto actuator = mpc.Solve(state, coeffs);
-          double steer_value = actuator[0];
+          double steer_value = -actuator[0];
           double throttle_value = actuator[1];
 
           json msgJson;
           msgJson["steering_angle"] = steer_value;
           msgJson["throttle"] = throttle_value;
+
+
           auto msg = "42[\"steer\"," + msgJson.dump() + "]";
           std::cout << msg << std::endl;
           // Latency

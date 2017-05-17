@@ -6,8 +6,29 @@
 using CppAD::AD;
 
 // TODO: Set the timestep length and duration
-size_t N = 50;
-double dt = 0.05;
+
+///////////////// How to choose N and dt values /////////////////////
+// 1. If the waypoint model is accurate enough, using a big 'N'
+// will help "foresee" the road further and thus plan driving in
+// a smoother way. 
+// However, since most of time the polynomial model
+// of waypoints is just a local approximation, a big N might 
+// increases the computation cost and decreases the accuracy - 
+// because the model is not accurate for 'N' too far away from 0.
+
+// 2. Using a smaller 'dt' would help find actuators parameters
+// that are optimal to "local approximations" that are not too
+// far away from the current position.
+// However, if 'dt' is too small and 'N' is also small, the driving
+// model won't be able to see "far" enough so it might have difficulties
+// at turning. 
+// Similiarly, using 'dt' should not be too small compared to latency.
+
+// In practice, 'N' or/and 'dt' should be increased when the reference
+// speed is increased - this helps look further ahead on the road, and
+// make the driving smoother.
+size_t N = 20;
+double dt = 0.2;
 
 // This value assumes the model presented in the classroom is used.
 //
@@ -25,7 +46,7 @@ const double Lf = 2.67;
 // https://github.com/udacity/CarND-MPC-Quizzes/blob/master/mpc_to_line/solution/MPC.cpp
 double ref_cte = 0; // target cross track error
 double ref_epsi = 0; // target oritent error
-double ref_v = 40; // target speed
+double ref_v = 80; // target speed
 
 // index for variables and condtions
 size_t x_start = 0;
@@ -53,30 +74,40 @@ class FG_eval {
 
     // set objective function as fg[0] - accumulative on all predictions
 
-    // objective 1 - keep up with target error and speed
-    AD<double> target_error_loss = 0;
+    // different objectives
+    AD<double> cte_loss = 0,
+               epsi_loss = 0,
+               v_loss = 0,
+               delta_loss = 0,
+               a_loss = 0,
+               delta_smooth = 0,
+               a_smooth = 0;
     for (auto i = 0; i < N; ++i) {
-      target_error_loss += CppAD::pow(vars[cte_start+i] - ref_cte, 2);
-      target_error_loss += CppAD::pow(vars[epsi_start+i] - ref_epsi, 2);
-      target_error_loss += CppAD::pow(vars[v_start+i] - ref_v, 2);
+      cte_loss += CppAD::pow(vars[cte_start+i] - ref_cte, 2);
+      epsi_loss += CppAD::pow(vars[epsi_start+i] - ref_epsi, 2);
+      v_loss += CppAD::pow(vars[v_start+i] - ref_v, 2);
+      if (i < N - 1) {
+        delta_loss += CppAD::pow(vars[delta_start+i], 2);
+        a_loss += CppAD::pow(vars[a_start+i], 2);
+      }
+      if (i < N - 2) {
+        delta_smooth += CppAD::pow(vars[delta_start+i+1] - vars[delta_start+i], 2);
+        a_smooth += CppAD::pow(vars[a_start+i+1] - vars[a_start+i], 2);
+      }
     }
+    //////////////// objective as weighted sum ///////////////////////
+    // When refence speed is set, tuning of loss weights is based 
+    // on trial-and-error. But there are still some intuitions behind
+    // different components.
 
-    // objective 2 - minimize actuators usage (l2 penalty)
-    AD<double> actuator_l2_loss = 0;
-    for (auto i = 0; i < N-1; ++i) {
-      actuator_l2_loss += CppAD::pow(vars[delta_start+i], 2);
-      actuator_l2_loss += CppAD::pow(vars[a_start+i], 2);
-    }
+    fg[0] =   1000 * cte_loss          /*staying on the track by miminizing cte and epsi*/
+            + 1000 * epsi_loss         /*these should be the most important things in driving*/
+            + 1 * v_loss              /*release v constraint when driving at high speed*/
+            + 10 * delta_loss         /*heavier delta_loss makes driving smoother, same effect as restrcting delta ranges*/
+            + 50 * a_loss             /*restrict acceleration helps make driving smoother*/
+            + 100 * delta_smooth      /*smaller steering (delta) change means less wiggly*/
+            + 50 * a_smooth;          /*try to keep the driving speed constant*/
 
-    // objective 3 - minimize change of actuators
-    AD<double> actuator_smooth_loss = 0;
-    for (auto i = 0; i < N-2; ++i) {
-      actuator_smooth_loss += CppAD::pow(vars[delta_start+i+1] - vars[delta_start+i], 2);
-      actuator_smooth_loss += CppAD::pow(vars[a_start+i+1] - vars[a_start+i], 2);
-    }
-
-    // use a heavy weight for smooth loss for better driving
-    fg[0] = target_error_loss + actuator_l2_loss + 500*actuator_smooth_loss;
 
     // set constraints for each of 6 states, for every prediction point
     // Initial constraints
@@ -114,7 +145,7 @@ class FG_eval {
       AD<double> a0 = vars[a_start + i];
 
       AD<double> f0 = coeffs[0] + coeffs[1]*x0 + coeffs[2]*pow(x0,2) + coeffs[3]*pow(x0,3);
-      AD<double> psides0 = CppAD::atan(coeffs[1]+coeffs[2]*2*x0+coeffs[3]*3*x0*x0);
+      AD<double> psides0 = CppAD::atan(coeffs[1] + coeffs[2]*2*x0 + coeffs[3]*3*x0*x0);
 
       // Here's `x` to get you started.
       // The idea here is to constraint this value to be 0.
@@ -173,13 +204,6 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   for (int i = 0; i < n_vars; i++) {
     vars[i] = 0;
   }
-  // set initial state
-  vars[x_start] = x;
-  vars[y_start] = y;
-  vars[psi_start] = psi;
-  vars[v_start] = v;
-  vars[cte_start] = cte;
-  vars[epsi_start] = epsi;
 
   Dvector vars_lowerbound(n_vars);
   Dvector vars_upperbound(n_vars);
@@ -263,7 +287,7 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
 
   // Cost
   auto cost = solution.obj_value;
-  std::cout << "Cost " << cost << std::endl;
+  // std::cout << "Cost " << cost << std::endl;
 
   // TODO: Return the first actuator values. The variables can be accessed with
   // `solution.x[i]`.
